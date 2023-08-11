@@ -1,0 +1,396 @@
+#!/usr/bin/env python
+
+"""
+Fit the early inspiral using SEOBNRv4E, using fitted optimal parameters.
+Should be called on a SimulationAnnex directory, where it will read mass ratio
+and spins, and horizon data.
+
+Outputs a pdf with diagnostics and final fits, as well as printing the final
+time to merger.
+"""
+
+from __future__ import division
+from __future__ import print_function
+
+import os
+import argparse
+
+import matplotlib
+from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy
+
+matplotlib.rcParams["mathtext.fontset"] = "stix"
+matplotlib.rcParams["font.family"] = "STIXGeneral"
+matplotlib.rcParams["axes.linewidth"] = 1  # set the value globally
+plt.rcParams["figure.figsize"] = (14, 10)
+plt.rcParams["font.size"] = "18"
+
+import argparse
+import os
+
+from scipy.interpolate import InterpolatedUnivariateSpline
+import lal, lalsimulation
+import gw_eccentricity
+import sxs
+
+
+# Some functions to plot the time domain modes
+def AmpPhysicaltoNRTD(ampphysical, M, dMpc):
+    return ampphysical * dMpc * 1e6 * lal.PC_SI / (lal.C_SI * (M * lal.MTSUN_SI))
+
+
+def compute_freqInterp(time, hlm):
+    philm = np.unwrap(np.angle(hlm))
+
+    intrp = InterpolatedUnivariateSpline(time, philm)
+    omegalm = intrp.derivative()(time)
+
+    return omegalm
+
+
+def SectotimeM(seconds, M):
+    return seconds / (M * lal.MTSUN_SI)
+
+
+# Function to compute amplitude, phase and frequency difference
+
+
+def compute_phase_amp_om_diff(
+    timeNRv4EHM,
+    amplmv4EHM,
+    phaselmv4EHM,
+    omegalmv4EHM,
+    timeNRv4HM,
+    amplmv4HM,
+    phaselmv4HM,
+    omegalmv4HM,
+    mode_list,
+    align_start=True,
+):
+    timeCommon = {}
+    phidiff = {}
+    omdiff = {}
+    ampdiff = {}
+    for l, m in mode_list:
+        # print(l,m)
+        ttv4EHM = timeNRv4EHM
+        ampv4EHM = amplmv4EHM[l, m]
+        phv4EHM = phaselmv4EHM[l, m]
+        omv4EHM = omegalmv4EHM[l, m]
+
+        ttv4HM = timeNRv4HM
+        ampv4HM = amplmv4HM[l, m]
+        phv4HM = phaselmv4HM[l, m]
+        omv4HM = omegalmv4HM[l, m]
+
+        dtv4E = ttv4EHM[-1] - ttv4EHM[-2]
+        dtv4 = ttv4HM[-1] - ttv4HM[-2]
+        dt = min(dtv4E, dtv4)
+
+        t0v4 = ttv4HM[0]
+        t0v4E = ttv4EHM[0]
+
+        tmin = max(t0v4, t0v4E)
+        tmax = min(ttv4HM[-1], ttv4EHM[-1])
+
+        timeCommon = np.arange(tmin, tmax, dt)
+
+        iphv4 = InterpolatedUnivariateSpline(ttv4HM, phv4HM)
+        iomv4 = InterpolatedUnivariateSpline(ttv4HM, omv4HM)
+        iampv4 = InterpolatedUnivariateSpline(ttv4HM, ampv4HM)
+
+        iphv4E = InterpolatedUnivariateSpline(ttv4EHM, phv4EHM)
+        iomv4E = InterpolatedUnivariateSpline(ttv4EHM, omv4EHM)
+        iampv4E = InterpolatedUnivariateSpline(ttv4EHM, ampv4EHM)
+
+        if align_start == True:
+            delta_phi0 = -iphv4(tmin) + iphv4E(tmin)
+
+        else:
+            tAlign = 0
+            delta_phi0 = -iphv4(tAlign) + iphv4E(tAlign)
+
+        phidiff[l, m] = iphv4E(timeCommon) - (iphv4(timeCommon) + delta_phi0)
+        ampdiff[l, m] = iampv4E(timeCommon) - iampv4(timeCommon)
+        omdiff[l, m] = iomv4E(timeCommon) - iomv4(timeCommon)
+
+    return timeCommon, phidiff, omdiff, ampdiff
+
+
+def waveform_to_frequency(waveform_dict):
+    return -np.diff(np.unwrap(np.angle(waveform_dict["hlm"][(2, 2)]))) / np.diff(
+        waveform_dict["t"]
+    )
+
+
+def compute_deriv_f(time, f):
+    intrp = InterpolatedUnivariateSpline(time, f)
+    deriv = intrp.derivative()(time)
+
+    return deriv
+
+
+def compute_deriv_f(time, f):
+    intrp = InterpolatedUnivariateSpline(time, f)
+    deriv = intrp.derivative()(time)
+
+    return deriv
+
+
+# Generate modes in NR units (rescaled by total mass of the system)
+def SEOBNRv4EHM_modes_lightweight(
+    q: float,
+    chi1: float,
+    chi2: float,
+    eccentricity: float,
+    eccentric_anomaly: float,
+    f_min: float,
+    M_fed: float,
+    delta_t: float,
+    EccIC: int,
+):
+    # Some internal parameters of the model
+    HypPphi0, HypR0, HypE0 = [0.0, 0, 0]
+
+    EccFphiPNorder = 99
+    EccFrPNorder = 99
+    EccWaveformPNorder = 16
+    EccBeta = 0.09
+    Ecct0 = 100
+
+    EccPNFactorizedForm = (
+        EccNQCWaveform
+    ) = EccPNRRForm = EccPNWfForm = EccAvNQCWaveform = 1
+    EcctAppend = 40
+
+    m1 = q / (1 + q) * M_fed
+    m2 = 1 / (1 + q) * M_fed
+    dMpc = 500
+    dist = dMpc * (1e6 * lal.PC_SI)
+
+    SpinAlignedVersion = 41
+    nqcCoeffsInput = lal.CreateREAL8Vector(
+        50
+    )  ##This will be unused, but it is necessary
+
+    sphtseries, dyn, dynHi = lalsimulation.SimIMRSpinAlignedEOBModesEcc_opt(
+        delta_t,
+        m1 * lal.MSUN_SI,
+        m2 * lal.MSUN_SI,
+        f_min,
+        dist,
+        chi1,
+        chi2,
+        eccentricity,
+        eccentric_anomaly,
+        SpinAlignedVersion,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        nqcCoeffsInput,
+        0,
+        EccFphiPNorder,
+        EccFrPNorder,
+        EccWaveformPNorder,
+        EccPNFactorizedForm,
+        EccBeta,
+        Ecct0,
+        EccNQCWaveform,
+        EccPNRRForm,
+        EccPNWfForm,
+        EccAvNQCWaveform,
+        EcctAppend,
+        EccIC,
+        HypPphi0,
+        HypR0,
+        HypE0,
+    )
+    hlm = {}
+
+    ##22 mode
+    modeL = sphtseries.next.next.next.next.l
+    modeM = sphtseries.next.next.next.next.m
+    h22 = sphtseries.next.next.next.next.mode.data.data  # This is h_22
+    hlm[modeL, modeM] = AmpPhysicaltoNRTD(h22, M_fed, dMpc)
+    hlm[modeL, -modeM] = ((-1) ** modeL) * np.conjugate(hlm[modeL, modeM])
+
+    time_array = np.arange(0, len(hlm[2, 2]) * delta_t, delta_t)
+    timeNR = SectotimeM(time_array, M_fed)
+
+    lenDyn = int(dyn.length / 5)
+
+    tdyn = dyn.data[0:lenDyn]
+    tdyn -= tdyn[0]
+    rdyn = dyn.data[lenDyn : 2 * lenDyn]
+
+    imax = np.argmax(np.abs(hlm[2, 2]))
+    timeNR -= timeNR[imax]
+
+    return (tdyn, rdyn, timeNR)
+
+
+# Function to minimise over.
+def func(t, ecc0, Omega0):
+    (
+        eobt,
+        eobr,
+        NRtime,
+    ) = SEOBNRv4EHM_modes_lightweight(
+        q,
+        chi1,
+        chi2,
+        ecc0,
+        ecc_anomaly,
+        Omega0,
+        Mtot,
+        delta_t,
+        EccIC,
+    )
+    eobr_interp = scipy.interpolate.interp1d(eobt, eobr)
+    plt.figure(figsize=(8, 6))
+    plt.plot(t, eobr_interp(t), label="Function Evaluation")
+    plt.plot(t, seperation, label="NR")
+    plt.title(f"ecc_change = {ecc0:.3}, fmin_change = {Omega0:.3}")
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    pdf.savefig()
+    plt.close()
+    return eobr_interp(t)
+
+
+def final_call(ecc0, Omega0):
+    (teob, reob, NRtime) = SEOBNRv4EHM_modes_lightweight(
+        q,
+        chi1,
+        chi2,
+        ecc0,
+        ecc_anomaly,
+        Omega0,
+        Mtot,
+        delta_t,
+        EccIC,
+    )
+    return np.abs(NRtime[0])
+
+
+# ===============================================================
+if __name__ == "__main__":
+    p = argparse.ArgumentParser(usage=__doc__)
+    p.add_argument(
+        "--dir",
+        nargs=1,
+        help="SimulationAnnex directory to run fits on. Needs to contain horizons and metadata.",
+    )
+    p.add_argument(
+        "--out",
+        default="summary.pdf",
+        help="Output filename of the generated pdf-plots",
+    )
+    args = p.parse_args()
+
+    # Load NR seperation
+    nr_horizons = sxs.load(args.dir[0] + "/Horizons")
+    seperation = np.zeros(np.array(nr_horizons.a.coord_center_inertial[:, 0]).size)
+    for i in range(3):
+        seperation += (
+            np.array(nr_horizons.a.coord_center_inertial[:, i])
+            - np.array(nr_horizons.b.coord_center_inertial[:, i])
+        ) ** 2
+
+    seperation = np.sqrt(seperation)
+    time = nr_horizons.a.time
+
+    meta = sxs.Metadata.from_txt_file(args.dir[0] + "/metadata.txt")
+    NR_omega0 = meta["initial_orbital_frequency"]
+
+    sign = np.sign(np.diff(seperation))
+    signchange = ((np.roll(sign, 1) - sign) != 0).astype(int)
+    signchange[0:100] = 0
+    apastron_index = 6
+    array_index = 0
+    while apastron_index > 0:
+        array_index += 1
+        while signchange[array_index] == 0:
+            array_index += 1
+        apastron_index -= 1
+
+    seperation = seperation[: array_index + 1]
+    time = time[: array_index + 1]
+
+    nr_waveform = gw_eccentricity.load_data.load_sxs_catalogformat(
+        filepath=args.dir[0] + "/Strain_N3"
+    )
+
+    nr_results = gw_eccentricity.gw_eccentricity.measure_eccentricity(
+        tref_in=nr_waveform["t"][int(nr_waveform["t"].size / 2)],
+        dataDict=nr_waveform,
+    )
+
+    t_ref = nr_results["gwecc_object"].t_apocenters[0]
+    nr_merger = np.abs(t_ref)
+    t_ref_2 = nr_results["gwecc_object"].t_apocenters[3]
+    start_ind = np.argmin(np.abs(nr_waveform["t"] - t_ref))
+    end_ind = np.argmin(np.abs(nr_waveform["t"] - t_ref_2))
+    t_for_omega22_avg, omega22_avg = nr_results["gwecc_object"].get_omega22_average()
+    ind = np.argmin(np.abs(t_for_omega22_avg - t_ref))
+    omega22_ref = omega22_avg[ind]
+    nr_results = gw_eccentricity.gw_eccentricity.measure_eccentricity(
+        fref_in=omega22_ref / 2 / np.pi, dataDict=nr_waveform
+    )
+
+    q = meta["initial_mass1"] / meta["initial_mass2"]
+    chi1, chi2 = (
+        meta["initial_dimensionless_spin1"][-1],
+        meta["initial_dimensionless_spin2"][-1],
+    )
+    Mtot = 40.0
+    delta_t = 1.0 / (4096.0) / 2.0
+    EccIC = -2
+    ecc_anomaly = np.pi
+    pdf = PdfPages(args.out)
+
+    xtol, gtol, ftol = 1e-15, 1e-15, 1e-15
+    initial_guess = np.array(
+        [
+            0.99 * nr_results["eccentricity"],
+            0.92 * nr_results["fref_out"] / lal.MTSUN_SI / Mtot,
+        ]
+    )
+
+    popt, pcov = scipy.optimize.curve_fit(
+        func,
+        time,
+        seperation,
+        p0=initial_guess,
+        bounds=(0.8 * initial_guess, 1.2 * initial_guess),
+        method="trf",
+        gtol=gtol,
+        xtol=xtol,
+        ftol=ftol,
+        verbose=2,
+        diff_step=np.array([0.1, 0.01]),
+    )
+    eob_merger = final_call(*popt)
+    nr_merger = meta["common_horizon_time"]
+
+    print("done!")
+    print(f"NR merger time was {nr_merger}")
+    print(f"EOB merger time was {eob_merger}")
+    print(f"Relative error is {np.abs(nr_merger-eob_merger)/nr_merger}")
+
+    pdf.close()
+    print(popt)
+
+    os.sys.exit(0)
+
+###########################################
