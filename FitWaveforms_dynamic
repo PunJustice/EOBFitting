@@ -14,6 +14,7 @@ from __future__ import print_function
 
 import os
 import argparse
+import h5py as h5
 
 import matplotlib
 from matplotlib.backends.backend_pdf import PdfPages
@@ -32,8 +33,7 @@ import os
 
 from scipy.interpolate import InterpolatedUnivariateSpline
 import lal, lalsimulation
-import gw_eccentricity
-import sxs
+from scipy.optimize import curve_fit
 
 
 # Some functions to plot the time domain modes
@@ -139,6 +139,11 @@ def compute_deriv_f(time, f):
     return deriv
 
 
+def first_two_extrema(data):
+    extrema = np.nonzero(np.diff(np.sign(np.diff(data))))
+    return extrema[0][:2]
+
+
 # Generate modes in NR units (rescaled by total mass of the system)
 def SEOBNRv4EHM_modes_lightweight(
     q: float,
@@ -230,117 +235,169 @@ def SEOBNRv4EHM_modes_lightweight(
     time_array = np.arange(0, len(hlm[2, 2]) * delta_t, delta_t)
     timeNR = SectotimeM(time_array, M_fed)
 
-    lenDyn = int(dyn.length / 5)
-    tdyn = dyn.data[0:lenDyn]
-    tdyn -= tdyn[0]
-    rdyn = dyn.data[lenDyn : 2 * lenDyn]
-
     imax = np.argmax(np.abs(hlm[2, 2]))
     timeNR -= timeNR[imax]
 
-    phidyn = dyn.data[2 * lenDyn : 3 * lenDyn]
-    omegaOrbital = compute_deriv_f(tdyn, phidyn)
-
-    return (timeNR, hlm, rdyn, omegaOrbital)
+    return (
+        timeNR,
+        hlm,
+    )
 
 
 # Function to minimise over.
-def func(f_min):
-    (timeNRv4EHM, _, _, _) = SEOBNRv4EHM_modes_lightweight(
+def func(t, ecc, f_min):
+    (
+        timeNRv4EHM,
+        hlmv4EHM,
+    ) = SEOBNRv4EHM_modes_lightweight(
         q,
         chi1,
         chi2,
-        args.efin[0],
-        ecc_anomaly,
-        float(f_min),
-        Mtot,
-        delta_t,
-        EccIC,
-    )
-    print(np.abs(args.Tfin[0] + timeNRv4EHM[0]))
-    return np.abs(args.Tfin[0] + timeNRv4EHM[0])
-
-
-def initial_check(f_min):
-    (timeNRv4EHM, _, _, _) = SEOBNRv4EHM_modes_lightweight(
-        q,
-        chi1,
-        chi2,
-        args.e0[0],
+        ecc,
         ecc_anomaly,
         f_min,
         Mtot,
         delta_t,
         EccIC,
     )
-    return timeNRv4EHM[0]
+    A_22_eob = np.abs(hlmv4EHM[2, 2])
+    A_22_eob_interp = scipy.interpolate.interp1d(timeNRv4EHM - timeNRv4EHM[0], A_22_eob)
+    plt.figure(figsize=(8, 6))
+    plt.plot(t, A_22_eob_interp(t), label="Function Evaluation")
+    plt.plot(t, A22_NR, label="NR")
+    plt.title(f"ecc_change = {ecc:.3}, fmin_change = {f_min:.3}")
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    pdf.savefig()
+    plt.close()
+    return A_22_eob_interp(t)
 
 
-def read_sep_omega(ecc, f_min):
-    (_, _, rdyn, omegadyn) = SEOBNRv4EHM_modes_lightweight(
+def final_call(ecc, f_min, dt):
+    (
+        timeNRv4EHM,
+        hlmv4EHM,
+    ) = SEOBNRv4EHM_modes_lightweight(
         q,
         chi1,
         chi2,
-        float(ecc),
+        ecc,
         ecc_anomaly,
-        float(f_min),
+        f_min,
         Mtot,
         delta_t,
         EccIC,
     )
-    return [rdyn[0], omegadyn[0]]
+    A_22_eob = np.abs(hlmv4EHM[2, 2])
+    A_22_eob_interp = scipy.interpolate.interp1d(
+        timeNRv4EHM - timeNRv4EHM[0] - dt, A_22_eob
+    )
+    plt.figure(figsize=(8, 6))
+    plt.plot(t_NR, A_22_eob_interp(t_NR), label="Function Evaluation")
+    plt.plot(t_NR, A22_NR, label="NR")
+    plt.title(f"ecc_change = {ecc:.3}, fmin_change = {f_min:.3}")
+    plt.grid()
+    plt.legend()
+    plt.tight_layout()
+    pdf.savefig()
+    plt.close()
+    return np.abs(timeNRv4EHM[0])
 
 
 # ===============================================================
 if __name__ == "__main__":
     p = argparse.ArgumentParser(usage=__doc__)
     p.add_argument(
+        "--dir",
+        nargs=1,
+        help="Path to rh_FiniteRadii_CodeUnits.h5",
+    )
+    p.add_argument(
+        "--out",
+        default="summary.pdf",
+        help="Output filename of the generated pdf-plots",
+    )
+    p.add_argument(
+        "--q",
+        type=float,
+        help="Mass ratio.",
+    )
+    p.add_argument(
+        "--spin1",
+        type=float,
+        help="Spin of primary BH.",
+    )
+    p.add_argument(
+        "--spin2",
+        type=float,
+        help="Spin of secondary BH.",
+    )
+    p.add_argument(
         "--e0",
         type=float,
-        nargs=1,
-        help="Initial eccentricity input.",
+        help="Eccentricity initial guess.",
     )
     p.add_argument(
         "--f0",
         type=float,
-        nargs=1,
-        help="Initial f_min input.",
+        help="Frequency initial guess.",
     )
-    p.add_argument("--efin", nargs=1, type=float, help="Target eccentricity.")
-    p.add_argument("--Tfin", nargs=1, type=float, help="Target merger time.")
-    p.add_argument("--q0", nargs=1, type=float, help="Mass-ratio.")
-    p.add_argument("--spin1", nargs=1, type=float, default=0.0, help="Spin 1.")
-    p.add_argument("--spin2", nargs=1, type=float, default=0.0, help="Spin 2.")
-
     args = p.parse_args()
 
-    q = args.q0[0]
+    # Load NR waveform
+    waveform_file = h5.File(
+        args.dir[0],
+        "r",
+    )
+    extraction_radius = int(list(waveform_file.keys())[0][1:5])
+    waveform = waveform_file[list(waveform_file.keys())[0]]["Y_l2_m2.dat"]
+    t = waveform[:, 0]
+    A22 = np.sqrt(waveform[:, 1] ** 2.0 + waveform[:, 2] ** 2.0)
+
+    t_index = np.argmin(np.abs(t - 200 - extraction_radius))
+
+    extrema_index = first_two_extrema(A22[t_index:])
+    half_orbit = t[extrema_index[1]] - t[extrema_index[0]]
+    start_index = np.argmin(np.abs(t - t[extrema_index[0]] - half_orbit))
+    A22_NR = A22[start_index:]
+    t_NR = t[start_index:]
+    t_NR = t_NR - t_NR[0]
+
+    q = args.q
     chi1, chi2 = (
-        args.spin1[0],
-        args.spin2[0],
+        args.spin1,
+        args.spin2,
     )
     Mtot = 40.0
     delta_t = 1.0 / (4096.0) / 2.0
     EccIC = -2
     ecc_anomaly = np.pi
+    pdf = PdfPages(args.out)
 
-    tol = 1e-4
-    initial_guess = np.array([args.f0[0]])
+    xtol, gtol, ftol = 1e-15, 1e-15, 1e-15
+    initial_guess = np.array([args.e0, args.f0])
 
-    T_initial = -initial_check(args.f0[0])
-    print("EOB predicted merger time: " + str(T_initial))
+    # popt, pcov = curve_fit(
+    #     func,
+    #     t_NR,
+    #     A22_NR,
+    #     p0=initial_guess,
+    #     method="trf",
+    #     gtol=gtol,
+    #     xtol=xtol,
+    #     ftol=ftol,
+    #     verbose=2,
+    #     diff_step=np.array([0.2, 0.1]),
+    # )
+    # eob_merger = final_call(*popt)
+    merger_time = final_call(0.445, 12.8, 95.0)
+    print(merger_time)
+    # print(f"EOB merger time was {eob_merger}")
+    # print("EOB parameters are:")
 
-    res = scipy.optimize.minimize(
-        func,
-        initial_guess,
-        method="Nelder-Mead",
-        tol=tol,
-    )
-
-    print("Initial seperation and frequency:")
-    print(read_sep_omega(args.e0[0], args.f0[0]))
-    print("Final seperation and frequency:")
-    print(read_sep_omega(args.efin[0], res.x[0]))
+    pdf.close()
+    # print(popt)
 
     os.sys.exit(0)
 
