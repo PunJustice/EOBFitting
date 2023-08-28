@@ -132,13 +132,6 @@ def compute_deriv_f(time, f):
     return deriv
 
 
-def compute_deriv_f(time, f):
-    intrp = InterpolatedUnivariateSpline(time, f)
-    deriv = intrp.derivative()(time)
-
-    return deriv
-
-
 # Generate modes in NR units (rescaled by total mass of the system)
 def SEOBNRv4EHM_modes_lightweight(
     q: float,
@@ -341,6 +334,11 @@ if __name__ == "__main__":
     print(read_sep_omega(args.e0[0], args.f0[0]))
     print("Final seperation and frequency:")
     print(read_sep_omega(args.efin[0], res.x[0]))
+    print("Fractional Changes:")
+    print(
+        np.array(read_sep_omega(args.efin[0], res.x[0]))
+        / np.array(read_sep_omega(args.e0[0], args.f0[0]))
+    )
 
     os.sys.exit(0)
 
